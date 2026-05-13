@@ -444,7 +444,70 @@ app.post("/create-pix", async (req, res) => {
     });
   }
 });
+// GET /check-payment/:txid - Rota de backup para confirmação de pagamento Efí
+app.get("/check-payment/:txid", async (req, res) => {
+  const { txid } = req.params;
 
+  try {
+    log("[check-payment] consultando txid:", txid);
+
+    // 1. Consultar Efí
+    const efiResponse = await efiRequest("get", `/v2/cob/${txid}`);
+
+    log("[check-payment] status Efí:", efiResponse.status);
+
+    const status = efiResponse.status;
+    const cob = efiResponse.cob?.[0] || {};
+    const valor = cob.valor?.original || "0.00";
+
+    // 2. Se confirmado, enviar relay
+    if (status === "CONCLUIDA") {
+      log("[check-payment] pagamento confirmado");
+
+      const relayPayload = {
+        txid,
+        valor,
+        status: "paid",
+        secret: EFI_RELAY_SECRET,
+      };
+
+      const relayResponse = await enviarParaLovable(relayPayload);
+
+      log("[check-payment] relay enviado com status:", relayResponse.status);
+
+      return res.json({
+        paid: true,
+        status: "CONCLUIDA",
+        txid,
+        valor,
+        relayed: true,
+        relayStatus: relayResponse.status,
+        relayBody: relayResponse.data,
+      });
+    }
+
+    // 3. Se não estiver pago
+    log("[check-payment] pagamento não confirmado, status:", status);
+
+    return res.json({
+      paid: false,
+      status,
+      txid,
+      valor,
+    });
+  } catch (err) {
+    log("[check-payment] erro:", err.message);
+    log("[check-payment] detalhes:", JSON.stringify(err.response?.data || {}));
+
+    return res.status(500).json({
+      paid: false,
+      status: "error",
+      txid,
+      error: err.message,
+      details: err.response?.data || null,
+    });
+  }
+});
 app.post("/efi-webhook", processarWebhook);
 app.post("/efi-webhook/pix", processarWebhook);
 
