@@ -219,6 +219,10 @@ async function enviarParaLovable(payload) {
     body.external_reference = payload.pedidoId;
   }
 
+  if (payload.external_reference && !body.external_reference) {
+    body.external_reference = payload.external_reference;
+  }
+
   log("[relay] enviando para:", SITE_WEBHOOK_URL);
   log("[relay] body:", JSON.stringify(body, null, 2));
 
@@ -412,10 +416,7 @@ app.post("/create-pix", async (req, res) => {
       throw new Error("Efí não retornou loc.id");
     }
 
-    const qr = await efiRequest(
-      "get",
-      `/v2/loc/${locId}/qrcode`
-    );
+    const qr = await efiRequest("get", `/v2/loc/${locId}/qrcode`);
 
     log("[create-pix] qrcode gerado para txid:", txid);
 
@@ -444,70 +445,90 @@ app.post("/create-pix", async (req, res) => {
     });
   }
 });
-// GET /check-payment/:txid - Rota de backup para confirmação de pagamento Efí
+
+// GET /check-payment/:txid - Backup para confirmação de pagamento Efí
 app.get("/check-payment/:txid", async (req, res) => {
   const { txid } = req.params;
 
   try {
-    log("[check-payment] consultando txid:", txid);
+    log("[check-payment] consultando Efí:", txid);
 
-    // 1. Consultar Efí
-    const efiResponse = await efiRequest("get", `/v2/cob/${txid}`);
+    const cob = await efiRequest("get", `/v2/cob/${txid}`);
 
-    log("[check-payment] status Efí:", efiResponse.status);
+    log("[check-payment] status Efí:", JSON.stringify({
+      txid,
+      status: cob?.status,
+      valor: cob?.valor?.original,
+      solicitacaoPagador: cob?.solicitacaoPagador,
+    }));
 
-    const status = efiResponse.status;
-    const cob = efiResponse.cob?.[0] || {};
-    const valor = cob.valor?.original || "0.00";
+    if (cob?.status === "CONCLUIDA") {
+      const valor =
+        cob?.valor?.original ||
+        cob?.pix?.[0]?.valor ||
+        null;
 
-    // 2. Se confirmado, enviar relay
-    if (status === "CONCLUIDA") {
-      log("[check-payment] pagamento confirmado");
+      const externalReference =
+        typeof cob?.solicitacaoPagador === "string"
+          ? cob.solicitacaoPagador.replace(/^Pedido\s+/i, "").trim()
+          : null;
 
-      const relayPayload = {
+      log("[check-payment] pagamento confirmado, fazendo relay:", JSON.stringify({
+        txid,
+        valor,
+        externalReference,
+      }));
+
+      const relay = await enviarParaLovable({
         txid,
         valor,
         status: "paid",
-        secret: EFI_RELAY_SECRET,
-      };
+        external_reference: externalReference,
+        pedidoId: externalReference,
+      });
 
-      const relayResponse = await enviarParaLovable(relayPayload);
-
-      log("[check-payment] relay enviado com status:", relayResponse.status);
+      log("[check-payment] relay enviado:", JSON.stringify({
+        txid,
+        relayStatus: relay.status,
+      }));
 
       return res.json({
         paid: true,
         status: "CONCLUIDA",
         txid,
         valor,
-        relayed: true,
-        relayStatus: relayResponse.status,
-        relayBody: relayResponse.data,
+        external_reference: externalReference,
+        relayed: relay.status >= 200 && relay.status < 300,
+        relayStatus: relay.status,
+        relayBody: relay.data,
       });
     }
 
-    // 3. Se não estiver pago
-    log("[check-payment] pagamento não confirmado, status:", status);
+    log("[check-payment] pagamento pendente:", JSON.stringify({
+      txid,
+      status: cob?.status,
+    }));
 
     return res.json({
       paid: false,
-      status,
+      status: cob?.status || "pending",
       txid,
-      valor,
+      valor: cob?.valor?.original || null,
     });
-  } catch (err) {
-    log("[check-payment] erro:", err.message);
-    log("[check-payment] detalhes:", JSON.stringify(err.response?.data || {}));
+  } catch (error) {
+    log("[check-payment] erro:", error.message);
+    log("[check-payment] detalhes:", JSON.stringify(error.response?.data || {}));
 
     return res.status(500).json({
       paid: false,
       status: "error",
       txid,
-      error: err.message,
-      details: err.response?.data || null,
+      error: error.message,
+      details: error.response?.data || null,
     });
   }
 });
+
 app.post("/efi-webhook", processarWebhook);
 app.post("/efi-webhook/pix", processarWebhook);
 
